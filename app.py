@@ -208,14 +208,12 @@ def sync_dhl_api(master_df):
         chunk_size = 1 
         total_to_check = len(needs_update)
         
-        # UI: Add a sleek progress bar instead of a frozen spinner
         progress_bar = st.progress(0, text="Initiating DHL synchronization...")
         
         for i in range(0, total_to_check, chunk_size):
             chunk = needs_update[i:i + chunk_size]
             api_stats["api_calls"] += 1
             
-            # Update the progress bar text dynamically
             current_parcel_num = min(i + chunk_size, total_to_check)
             progress_bar.progress(current_parcel_num / total_to_check, text=f"Syncing parcel {current_parcel_num} of {total_to_check} with DHL...")
             
@@ -225,7 +223,7 @@ def sync_dhl_api(master_df):
                 if error_msg not in api_stats["errors"]: 
                     api_stats["errors"].append(error_msg)
                 
-                # THE EMERGENCY BRAKE: Stop immediately if DHL cuts us off
+                # THE EMERGENCY BRAKE: Keeps spreadsheet data if limit is reached
                 if "429" in error_msg or "Too Many Requests" in error_msg:
                     progress_bar.progress(1.0, text="⚠️ Daily DHL API limit reached. Halting sync.")
                     time.sleep(1.5)
@@ -235,9 +233,8 @@ def sync_dhl_api(master_df):
                 cache[trk] = {'status': status, 'timestamp': current_time}
                 api_stats["updated_rows"] += 1
             
-            time.sleep(1.0) # Pause to respect DHL rate limits
+            time.sleep(1.0) 
         
-        # Clean up the progress bar once finished
         progress_bar.empty()
         save_cache(cache)
         
@@ -254,7 +251,6 @@ try:
         st.warning("No tracking data available for Printflo. Please upload the latest CSV manifest.")
         st.stop()
 
-    # The progress bar is now handled inside sync_dhl_api, so we removed st.spinner
     df, stats = sync_dhl_api(df_raw)
 
     # --- Live Metric Calculations ---
@@ -311,6 +307,15 @@ try:
         filtered_df = filtered_df[filtered_df['Customer reference'].astype(str).str.contains(search_ref.strip(), case=False, na=False)]
     if selected_campaign != "All Campaigns":
         filtered_df = filtered_df[filtered_df['Campaign'] == selected_campaign]
+
+    # --- Dual-Layer Auto-Sort Logic ---
+    # 1. Pushes 'Delivered' items to the bottom.
+    # 2. Sorts remaining items by most recent dispatch date.
+    filtered_df['Is_Delivered'] = filtered_df['Clean Status'] == 'delivered'
+    if 'Dispatch Date Parsed' in filtered_df.columns:
+        filtered_df = filtered_df.sort_values(by=['Is_Delivered', 'Dispatch Date Parsed'], ascending=[True, False])
+    else:
+        filtered_df = filtered_df.sort_values(by=['Is_Delivered'], ascending=[True])
 
     # --- Formatting Blank Dates & ETAs for Delivered Parcels ---
     def format_delivered_blanks(row, col_name):
