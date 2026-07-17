@@ -69,36 +69,50 @@ def fetch_dhl_status_safe(tracking_numbers):
     except Exception as e:
         return {}, f"Connection Error on [{tracking_str}]: {str(e)}"
 
-# --- Custom CSS (Printflo Branding) ---
+# --- Custom CSS (Printflo Branding & Clean Layout) ---
 printflo_css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     
     html, body, [class*="css"]  { 
         font-family: 'Inter', sans-serif !important; 
-        background-color: #F8F9FA !important; /* Soft light grey background */
-        color: #111827 !important; /* High contrast dark grey text */
+        background-color: #F8F9FA !important; 
+        color: #111827 !important; 
     }
     
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
     
+    /* Center the Logo globally */
+    [data-testid="stImage"] {
+        display: flex;
+        justify-content: center;
+        margin-top: 10px;
+        margin-bottom: 5px;
+    }
+
+    /* Clean, centered header text */
     h1 { 
         font-weight: 700 !important; 
         letter-spacing: -0.5px; 
         color: #111827 !important;
-        border-bottom: 3px solid #174A8C; /* Printflo Brand Blue */
-        padding-bottom: 15px; 
-        margin-bottom: 30px; 
+        text-align: center !important;
+        border-bottom: none !important; 
+        padding-bottom: 0px !important;
+        margin-bottom: 5px !important; 
     }
     
-    /* Style the big numbers to match the Printflo blue */
+    /* Center the metrics */
+    [data-testid="stMetric"] {
+        text-align: center !important;
+    }
+    
     [data-testid="stMetricValue"] { 
         font-size: 2.2rem !important; 
         font-weight: 700 !important; 
         color: #174A8C !important; 
+        justify-content: center !important;
     }
     
-    /* Clean, modern card-style table */
     table { 
         border-collapse: collapse !important; 
         width: 100% !important; 
@@ -131,17 +145,14 @@ printflo_css = """
 """
 st.markdown(printflo_css, unsafe_allow_html=True)
 
-# --- Header Section ---
-col1, col2 = st.columns([1, 5])
-with col1:
-    try:
-        st.image("printflo-logo.png", width=150)
-    except FileNotFoundError:
-        pass
-with col2:
-    st.title("Printflo Delivery Portal")
+# --- Header Section (Redesigned & Centered) ---
+try:
+    st.image("printflo-logo.png", width=280)
+except FileNotFoundError:
+    pass
 
-st.markdown("Track and manage network deliveries.")
+st.title("Delivery Portal")
+st.markdown("<p style='text-align: center; color: #6B7280; font-size: 1.1rem; margin-bottom: 40px;'>Track and manage network deliveries.</p>", unsafe_allow_html=True)
 
 # 1. LOAD CSV DATA 
 @st.cache_data(ttl=300) 
@@ -278,19 +289,16 @@ try:
     st.markdown("<hr><br>", unsafe_allow_html=True)
 
     # --- Side-by-Side Filtering ---
-    col_filter1, col_filter2, col_filter3, col_filter4 = st.columns(4)
+    col_filter1, col_filter2, col_filter3 = st.columns(3)
     
-    unique_stores = sorted(df['Business/Recipient name'].dropna().unique())
     unique_campaigns = sorted(df['Campaign'].dropna().unique()) if 'Campaign' in df.columns else []
         
-    selected_store = col_filter1.selectbox("SEARCH STORE BRANCH", ["All Stores"] + list(unique_stores))
-    search_postcode = col_filter2.text_input("SEARCH POSTCODE", placeholder="e.g. B78 3JD")
-    search_ref = col_filter3.text_input("SEARCH JOB NO.")
-    selected_campaign = col_filter4.selectbox("SEARCH CAMPAIGN", ["All Campaigns"] + list(unique_campaigns))
+    search_postcode = col_filter1.text_input("SEARCH POSTCODE", placeholder="e.g. B78 3JD")
+    search_ref = col_filter2.text_input("SEARCH CUSTOMER REF.")
+    selected_campaign = col_filter3.selectbox("SEARCH CAMPAIGN", ["All Campaigns"] + list(unique_campaigns))
 
     filtered_df = df.copy()
-    if selected_store != "All Stores":
-        filtered_df = filtered_df[filtered_df['Business/Recipient name'] == selected_store]
+
     if search_postcode.strip():
         filtered_df = filtered_df[filtered_df['Postal Code'].astype(str).str.contains(search_postcode.strip(), case=False, na=False)]
     if search_ref.strip() and 'Customer reference' in filtered_df.columns:
@@ -316,7 +324,6 @@ try:
             return ""
         clean_num = str(shipment_num).strip()
         url = f"https://www.dhl.com/en/express/tracking.html?AWB={clean_num}"
-        # Matches the Printflo deep blue
         return f'<a href="{url}" target="_blank" style="color: #174A8C; text-decoration: underline; font-weight: 600;">Track Order</a>'
 
     filtered_df['Tracking Link'] = filtered_df['Shipment number'].apply(make_clickable)
