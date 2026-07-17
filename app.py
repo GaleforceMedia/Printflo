@@ -173,8 +173,7 @@ def load_csv_data():
     if 'Dispatch date' in master_df.columns:
         master_df['Dispatch Date Parsed'] = pd.to_datetime(master_df['Dispatch date'], format='%d/%m/%Y', errors='coerce')
         
-    if 'Customer reference' in master_df.columns:
-        master_df.loc[master_df['Campaign'] != 'Standard Dispatch', 'Customer reference'] = "-"
+    # THE BUG FIX: The rule wiping out the Customer Reference for campaigns has been permanently deleted from here!
         
     return master_df
 
@@ -223,7 +222,6 @@ def sync_dhl_api(master_df):
                 if error_msg not in api_stats["errors"]: 
                     api_stats["errors"].append(error_msg)
                 
-                # THE EMERGENCY BRAKE
                 if "429" in error_msg or "Too Many Requests" in error_msg:
                     progress_bar.progress(1.0, text="⚠️ Daily DHL API limit reached. Halting sync.")
                     time.sleep(1.5)
@@ -315,10 +313,9 @@ try:
     else:
         filtered_df = filtered_df.sort_values(by=['Is_Delivered'], ascending=[True])
 
-    # --- EXPORT FEATURE (Clean Raw Data before HTML is applied) ---
+    # --- EXPORT FEATURE ---
     export_df = filtered_df.copy()
     
-    # Drop the background calculation columns so the CSV is perfectly clean
     cols_to_drop = ['Is_Delivered', 'Clean Status', 'Dispatch Date Parsed']
     export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns])
     
