@@ -223,7 +223,7 @@ def sync_dhl_api(master_df):
                 if error_msg not in api_stats["errors"]: 
                     api_stats["errors"].append(error_msg)
                 
-                # THE EMERGENCY BRAKE: Keeps spreadsheet data if limit is reached
+                # THE EMERGENCY BRAKE
                 if "429" in error_msg or "Too Many Requests" in error_msg:
                     progress_bar.progress(1.0, text="⚠️ Daily DHL API limit reached. Halting sync.")
                     time.sleep(1.5)
@@ -309,13 +309,28 @@ try:
         filtered_df = filtered_df[filtered_df['Campaign'] == selected_campaign]
 
     # --- Dual-Layer Auto-Sort Logic ---
-    # 1. Pushes 'Delivered' items to the bottom.
-    # 2. Sorts remaining items by most recent dispatch date.
     filtered_df['Is_Delivered'] = filtered_df['Clean Status'] == 'delivered'
     if 'Dispatch Date Parsed' in filtered_df.columns:
         filtered_df = filtered_df.sort_values(by=['Is_Delivered', 'Dispatch Date Parsed'], ascending=[True, False])
     else:
         filtered_df = filtered_df.sort_values(by=['Is_Delivered'], ascending=[True])
+
+    # --- EXPORT FEATURE (Clean Raw Data before HTML is applied) ---
+    export_df = filtered_df.copy()
+    
+    # Drop the background calculation columns so the CSV is perfectly clean
+    cols_to_drop = ['Is_Delivered', 'Clean Status', 'Dispatch Date Parsed']
+    export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns])
+    
+    csv_export_data = export_df.to_csv(index=False).encode('utf-8')
+    
+    st.download_button(
+        label="📥 Download Filtered Data as CSV",
+        data=csv_export_data,
+        file_name=f"Printflo_Deliveries_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv"
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
 
     # --- Formatting Blank Dates & ETAs for Delivered Parcels ---
     def format_delivered_blanks(row, col_name):
