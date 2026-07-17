@@ -7,7 +7,6 @@ import time
 import urllib.request
 import urllib.error
 import re
-import base64
 from datetime import datetime
 
 # Set up page layout
@@ -70,16 +69,7 @@ def fetch_dhl_status_safe(tracking_numbers):
     except Exception as e:
         return {}, f"Connection Error on [{tracking_str}]: {str(e)}"
 
-# --- Helper Function for Logo Alignment ---
-def get_base64_of_bin_file(bin_file):
-    try:
-        with open(bin_file, 'rb') as f:
-            data = f.read()
-        return base64.b64encode(data).decode()
-    except Exception:
-        return None
-
-# --- Custom CSS (Printflo Branding & Perfect Centering) ---
+# --- Custom CSS (Printflo Branding & Clean Layout) ---
 printflo_css = """
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -92,25 +82,19 @@ printflo_css = """
     
     #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
     
-    /* Center the metric labels (e.g. "In Transit") */
-    [data-testid="stMetricLabel"] {
-        justify-content: center !important;
-        text-align: center !important;
-    }
-    [data-testid="stMetricLabel"] > div {
-        width: 100%;
-        display: flex;
-        justify-content: center;
+    h1 { 
+        font-weight: 700 !important; 
+        letter-spacing: -0.5px; 
+        color: #111827 !important;
+        border-bottom: 3px solid #174A8C; 
+        padding-bottom: 10px; 
+        margin-bottom: 5px !important; 
     }
     
-    /* Center the metric values (e.g. "0") */
     [data-testid="stMetricValue"] { 
         font-size: 2.2rem !important; 
         font-weight: 700 !important; 
         color: #174A8C !important; 
-        display: flex !important;
-        justify-content: center !important;
-        text-align: center !important;
     }
     
     table { 
@@ -145,30 +129,19 @@ printflo_css = """
 """
 st.markdown(printflo_css, unsafe_allow_html=True)
 
-# --- Perfectly Centered Header Block ---
-img_b64 = get_base64_of_bin_file("printflo-logo.png")
-
-if img_b64:
-    st.markdown(
-        f'''
-        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; margin-top: 10px; margin-bottom: 40px;">
-            <img src="data:image/png;base64,{img_b64}" width="280">
-            <h1 style="border-bottom: none; margin-bottom: 5px; color: #111827; font-weight: 700; letter-spacing: -0.5px; margin-top: 25px;">Delivery Portal</h1>
-            <p style="color: #6B7280; font-size: 1.1rem; margin-top: 0px;">Track and manage network deliveries.</p>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown(
-        f'''
-        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; margin-top: 10px; margin-bottom: 40px;">
-            <h1 style="border-bottom: none; margin-bottom: 5px; color: #111827; font-weight: 700; letter-spacing: -0.5px; margin-top: 25px;">Delivery Portal</h1>
-            <p style="color: #6B7280; font-size: 1.1rem; margin-top: 0px;">Track and manage network deliveries.</p>
-        </div>
-        ''',
-        unsafe_allow_html=True
-    )
+# --- Header Section (Left-Aligned) ---
+col1, col2 = st.columns([1, 5])
+with col1:
+    try:
+        # Pushed down slightly to align better with the text
+        st.markdown("<div style='margin-top: 15px;'>", unsafe_allow_html=True)
+        st.image("printflo-logo.png", width=180)
+        st.markdown("</div>", unsafe_allow_html=True)
+    except FileNotFoundError:
+        pass
+with col2:
+    st.title("Printflo Delivery Portal")
+    st.markdown("<p style='color: #6B7280; font-size: 1.1rem; margin-top: 0px; margin-bottom: 30px;'>Track and manage network deliveries.</p>", unsafe_allow_html=True)
 
 # 1. LOAD CSV DATA 
 @st.cache_data(ttl=300) 
