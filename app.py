@@ -133,7 +133,6 @@ st.markdown(printflo_css, unsafe_allow_html=True)
 col1, col2 = st.columns([1, 5])
 with col1:
     try:
-        # Pushed down slightly to align better with the text
         st.markdown("<div style='margin-top: 15px;'>", unsafe_allow_html=True)
         st.image("printflo-logo.png", width=180)
         st.markdown("</div>", unsafe_allow_html=True)
@@ -207,21 +206,39 @@ def sync_dhl_api(master_df):
                 
     if needs_update:
         chunk_size = 1 
-        for i in range(0, len(needs_update), chunk_size):
+        total_to_check = len(needs_update)
+        
+        # UI: Add a sleek progress bar instead of a frozen spinner
+        progress_bar = st.progress(0, text="Initiating DHL synchronization...")
+        
+        for i in range(0, total_to_check, chunk_size):
             chunk = needs_update[i:i + chunk_size]
             api_stats["api_calls"] += 1
+            
+            # Update the progress bar text dynamically
+            current_parcel_num = min(i + chunk_size, total_to_check)
+            progress_bar.progress(current_parcel_num / total_to_check, text=f"Syncing parcel {current_parcel_num} of {total_to_check} with DHL...")
             
             updates, error_msg = fetch_dhl_status_safe(chunk)
             
             if error_msg != "Success":
-                api_stats["errors"].append(error_msg)
+                if error_msg not in api_stats["errors"]: 
+                    api_stats["errors"].append(error_msg)
+                
+                # THE EMERGENCY BRAKE: Stop immediately if DHL cuts us off
+                if "429" in error_msg or "Too Many Requests" in error_msg:
+                    progress_bar.progress(1.0, text="⚠️ Daily DHL API limit reached. Halting sync.")
+                    time.sleep(1.5)
+                    break
             
             for trk, status in updates.items():
                 cache[trk] = {'status': status, 'timestamp': current_time}
                 api_stats["updated_rows"] += 1
             
-            time.sleep(1.5) 
+            time.sleep(1.0) # Pause to respect DHL rate limits
         
+        # Clean up the progress bar once finished
+        progress_bar.empty()
         save_cache(cache)
         
     master_df['Status'] = master_df.apply(
@@ -237,8 +254,8 @@ try:
         st.warning("No tracking data available for Printflo. Please upload the latest CSV manifest.")
         st.stop()
 
-    with st.spinner("Synchronizing with DHL Network..."):
-        df, stats = sync_dhl_api(df_raw)
+    # The progress bar is now handled inside sync_dhl_api, so we removed st.spinner
+    df, stats = sync_dhl_api(df_raw)
 
     # --- Live Metric Calculations ---
     today = pd.Timestamp.now('Europe/London').normalize().tz_localize(None)
