@@ -1,0 +1,30 @@
+name: DHL Automated Background Sync
+
+on:
+  schedule:
+    # Runs at 08:00, 12:00, 15:00, and 18:00 UTC Monday-Friday
+    - cron: '0 8,12,15,18 * * 1-5'
+  workflow_dispatch: # Allows you to manually trigger it from GitHub if needed
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Run DHL Sync
+        run: python sync_dhl.py
+
+      - name: Commit & Push Updated Cache
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add printflo_tracking_cache.json
+          git commit -m "Auto-update DHL tracking statuses [skip ci]" || exit 0
+          git push
