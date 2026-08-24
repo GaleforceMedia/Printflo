@@ -4,6 +4,14 @@ Reads every CSV in data/ (and the repo root), collects shipment numbers that
 are not yet delivered, queries the DHL Shipment Tracking (Unified) API for
 each one, and writes the latest statuses to printflo_tracking_cache.json.
 
+For each parcel the cache stores:
+  status        - display status (Delivered / In Transit / Awaiting Collection / Exception)
+  description   - DHL's human-readable status line
+  delivered_at  - ISO timestamp of the actual delivery scan (when delivered)
+  eta           - DHL's estimated delivery timestamp (while in transit)
+  last_event    - latest scan: what happened and where
+  updated_at    - when this entry was last refreshed
+
 Run by the GitHub Action in .github/workflows/dhl_sync.yml. Requires the
 DHL_API_KEY environment variable (set it as a GitHub Actions secret).
 """
@@ -23,6 +31,10 @@ import pandas as pd
 DHL_API_KEY = os.environ.get("DHL_API_KEY", "")
 CACHE_FILE = "printflo_tracking_cache.json"
 DATA_GLOBS = ["data/*.csv", "*.csv"]
+
+# Pacing between successful calls. 10k/day allowance; keep a small gap to
+# stay clear of per-second spike arrests, and back off exponentially on 429s.
+CALL_INTERVAL = 0.3
 
 # DHL unified statusCode -> display status shown on the dashboard
 STATUS_MAP = {
@@ -83,8 +95,43 @@ def get_active_tracking_numbers() -> list:
     return [t for t in numbers if len(t) >= 10 and t.lower() != "nan"]
 
 
+def parse_shipment(shipment: dict) -> dict:
+    """Extract the fields we keep from one DHL shipment payload."""
+    status = shipment.get("status", {}) or {}
+    status_code = str(status.get("statusCode", "")).lower()
+
+    entry = {
+        "status_code": status_code,
+        "description": status.get("description", "") or status.get("status", ""),
+        "eta": shipment.get("estimatedTimeOfDelivery", ""),
+        "delivered_at": "",
+        "last_event": "",
+    }
+
+    # Latest scan event: what happened, where
+    events = shipment.get("events") or []
+    latest = events[0] if events else status
+    if latest:
+        desc = latest.get("description", "") or latest.get("status", "")
+        loc = (
+            ((latest.get("location") or {}).get("address") or {}).get("addressLocality", "")
+        )
+        entry["last_event"] = f"{desc} — {loc}".strip(" —") if (desc or loc) else ""
+
+    if status_code == "delivered":
+        # Prefer the delivery event's own timestamp, fall back to status timestamp
+        delivered_ts = ""
+        for ev in events:
+            if str(ev.get("statusCode", "")).lower() == "delivered":
+                delivered_ts = ev.get("timestamp", "")
+                break
+        entry["delivered_at"] = delivered_ts or status.get("timestamp", "")
+
+    return entry
+
+
 def fetch_with_backoff(tracking_num: str, max_retries: int = 4):
-    """Return (status_code, description) from DHL, or (None, None) on failure."""
+    """Return a parsed shipment dict from DHL, or None on failure."""
     url = f"https://api-eu.dhl.com/track/shipments?trackingNumber={tracking_num}"
     headers = {
         "DHL-API-Key": DHL_API_KEY,
@@ -98,13 +145,10 @@ def fetch_with_backoff(tracking_num: str, max_retries: int = 4):
             with urllib.request.urlopen(req, timeout=15) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode())
-                    for shipment in data.get("shipments", []):
-                        status = shipment.get("status", {})
-                        return (
-                            str(status.get("statusCode", "")).lower(),
-                            status.get("description", ""),
-                        )
-                return (None, None)
+                    shipments = data.get("shipments", [])
+                    if shipments:
+                        return parse_shipment(shipments[0])
+                return None
         except urllib.error.HTTPError as e:
             if e.code in (429, 503):  # rate limit / spike arrest
                 print(f"  Rate-limited on {tracking_num}; backing off {delay:.0f}s (attempt {attempt + 1})")
@@ -112,14 +156,14 @@ def fetch_with_backoff(tracking_num: str, max_retries: int = 4):
                 delay *= 2
             elif e.code == 404:
                 print(f"  {tracking_num}: not found (may not be in DHL system yet)")
-                return (None, None)
+                return None
             else:
                 print(f"  HTTP {e.code} on {tracking_num}")
-                return (None, None)
+                return None
         except Exception as e:
             print(f"  Connection error on {tracking_num}: {e}")
-            return (None, None)
-    return (None, None)
+            return None
+    return None
 
 
 def run_sync() -> None:
@@ -136,31 +180,36 @@ def run_sync() -> None:
 
     print(f"Found {len(active)} active parcels to check.")
     cache = load_cache()
-    now = time.time()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    checked = updated = 0
 
     for trk in active:
         if cache.get(trk, {}).get("status") == "Delivered":
             continue  # already final — never re-poll
 
-        print(f"Checking {trk}...")
-        status_code, description = fetch_with_backoff(trk)
+        checked += 1
+        result = fetch_with_backoff(trk)
 
-        if status_code:
-            display = STATUS_MAP.get(status_code)
+        if result:
+            display = STATUS_MAP.get(result["status_code"])
             if display is None:
                 # 'unknown' or anything unexpected — keep the CSV's status
-                print(f"  Unrecognised statusCode '{status_code}', leaving CSV status in place")
+                print(f"  {trk}: unrecognised statusCode '{result['status_code']}', keeping CSV status")
             else:
                 cache[trk] = {
                     "status": display,
-                    "description": description,
-                    "timestamp": now,
+                    "description": result["description"],
+                    "delivered_at": result["delivered_at"],
+                    "eta": result["eta"],
+                    "last_event": result["last_event"],
+                    "updated_at": now_iso,
                 }
+                updated += 1
 
-        time.sleep(1.0)  # stay under DHL spike-arrest limits
+        time.sleep(CALL_INTERVAL)
 
     save_cache(cache)
-    print("Sync complete. Cache updated.")
+    print(f"Sync complete. Checked {checked}, updated {updated}. Cache written.")
 
 
 if __name__ == "__main__":

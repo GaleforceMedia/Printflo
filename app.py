@@ -136,15 +136,28 @@ def load_and_merge_data() -> pd.DataFrame:
             master["Dispatch date"], format="%d/%m/%Y", errors="coerce"
         )
 
-    # Overlay live statuses from the background sync cache
-    cache = load_cache()
-    if "Status" in master.columns and cache:
-        master["Status"] = master.apply(
-            lambda row: cache.get(str(row.get("Shipment number", "")), {}).get(
-                "status", row["Status"]
-            ),
-            axis=1,
+    # Overlay live data from the background sync cache
+    cache = {k: v for k, v in load_cache().items() if not k.startswith("_")}
+    if "Shipment number" in master.columns and cache:
+        keys = master["Shipment number"].astype(str)
+        if "Status" in master.columns:
+            live_status = keys.map(lambda k: cache.get(k, {}).get("status"))
+            master["Status"] = live_status.fillna(master["Status"])
+        master["Last Seen"] = keys.map(lambda k: cache.get(k, {}).get("last_event", "") or "")
+        master["Delivered At Parsed"] = pd.to_datetime(
+            keys.map(lambda k: cache.get(k, {}).get("delivered_at", "") or None),
+            errors="coerce",
+            utc=True,
         )
+        # Live ETA from DHL overrides the CSV's ETA window where available
+        live_eta = pd.to_datetime(
+            keys.map(lambda k: cache.get(k, {}).get("eta", "") or None),
+            errors="coerce",
+        )
+        if "ETA" in master.columns:
+            master["ETA"] = live_eta.dt.strftime("%d/%m by %H:%M").fillna(master["ETA"])
+        else:
+            master["ETA"] = live_eta.dt.strftime("%d/%m by %H:%M")
 
     return master
 
@@ -177,7 +190,6 @@ df["Clean Status"] = df["Status"].astype(str).str.strip().str.lower()
 
 today = pd.Timestamp.now(tz="Europe/London").tz_localize(None).normalize()
 start_of_week = today - pd.Timedelta(days=today.dayofweek)
-start_of_month = today.replace(day=1)
 
 total_shipments = len(df)
 in_transit = int((df["Clean Status"] == "in transit").sum())
@@ -187,11 +199,17 @@ exceptions = int(
     df["Clean Status"].str.contains("exception|delay|fail", na=False, regex=True).sum()
 )
 
+# Real delivery timestamps (from DHL scans, via the sync cache)
+delivered_today = delivered_week = 0
+if "Delivered At Parsed" in df.columns:
+    delivered_local = df["Delivered At Parsed"].dt.tz_convert("Europe/London").dt.tz_localize(None)
+    delivered_today = int((delivered_local >= today).sum())
+    delivered_week = int((delivered_local >= start_of_week).sum())
+
 if "Dispatch Date Parsed" in df.columns:
     dispatched_week = int((df["Dispatch Date Parsed"] >= start_of_week).sum())
-    dispatched_month = int((df["Dispatch Date Parsed"] >= start_of_month).sum())
 else:
-    dispatched_week = dispatched_month = 0
+    dispatched_week = 0
 
 st.markdown("<br>", unsafe_allow_html=True)
 m1, m2, m3, m4, m5 = st.columns(5)
@@ -200,6 +218,11 @@ m2.metric("In Transit", f"{in_transit:,}")
 m3.metric("Out for Delivery", f"{out_for_delivery:,}")
 m4.metric("Delivered", f"{delivered:,}")
 m5.metric("Exceptions", f"{exceptions:,}")
+
+n1, n2, n3, _, _ = st.columns(5)
+n1.metric("Delivered Today", f"{delivered_today:,}", help="From DHL delivery scans (live sync)")
+n2.metric("Delivered This Week", f"{delivered_week:,}", help="From DHL delivery scans (live sync)")
+n3.metric("Dispatched This Week", f"{dispatched_week:,}")
 
 # Last-sync stamp: prefer timestamp recorded inside the cache, fall back to file mtime
 sync_time_str = "Awaiting initial background sync"
@@ -273,7 +296,11 @@ st.markdown(
 
 # ------------------------------------------------------------------ export
 export_df = filtered.drop(
-    columns=[c for c in ("Is_Delivered", "Clean Status", "Dispatch Date Parsed") if c in filtered.columns]
+    columns=[
+        c
+        for c in ("Is_Delivered", "Clean Status", "Dispatch Date Parsed", "Delivered At Parsed")
+        if c in filtered.columns
+    ]
 )
 st.download_button(
     label="📥 Download filtered data as CSV",
@@ -334,8 +361,8 @@ filtered["Status"] = filtered["Status"].apply(color_status)
 
 display_cols = [
     "Campaign", "Customer reference", "Business/Recipient name", "Status",
-    "Delivery due date", "ETA", "Tracking Link", "Number of parcels",
-    "Weight", "Shipment number", "Postal Code",
+    "Last Seen", "Delivery due date", "ETA", "Tracking Link",
+    "Number of parcels", "Weight", "Shipment number", "Postal Code",
 ]
 available = [c for c in display_cols if c in filtered.columns]
 st.write(filtered[available].to_html(escape=False, index=False), unsafe_allow_html=True)

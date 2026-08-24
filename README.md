@@ -30,7 +30,7 @@ Repo → Settings → Secrets and variables → Actions → New repository secre
 
 > **Important:** the previous version of this project had the API key hardcoded in `sync_dhl.py`. That key should be treated as compromised — rotate it in the DHL developer portal and use the new one here.
 
-The sync workflow (`.github/workflows/dhl_sync.yml`) runs at 08:00, 12:00, 15:00 and 18:00 UTC on weekdays, and can be run manually from the Actions tab.
+The sync workflow (`.github/workflows/dhl_sync.yml`) runs hourly from 06:00 to 20:00 UTC, Monday–Saturday, and can be run manually from the Actions tab.
 
 ### 3. Deploy on Streamlit Community Cloud
 
@@ -67,7 +67,9 @@ Optional: `export DHL_API_KEY=...` and `python sync_dhl.py` to refresh statuses 
 ## DHL API notes & rate limits
 
 - Endpoint used: `GET https://api-eu.dhl.com/track/shipments?trackingNumber=...` (Shipment Tracking – Unified).
-- Free tier: **250 calls/day, max 1 call per 5 seconds** — request a production upgrade in the DHL developer portal if the number of active (undelivered) parcels regularly exceeds that. The sync only polls parcels not yet marked delivered, and never re-polls delivered ones, to keep usage down.
+- Current allowance: **10,000 calls/day**. The hourly Mon–Sat schedule uses roughly `active parcels x 15` calls per day (~2,500 at 170 active parcels), so there is headroom up to ~650 active parcels. The sync only polls parcels not yet marked delivered, and never re-polls delivered ones.
+- Calls are paced at ~0.3s apart with exponential backoff on 429/503, so a burst-limit change on DHL's side degrades gracefully rather than failing.
+- Each sync also captures the **actual delivery scan timestamp**, DHL's **live ETA**, and the **last scan event/location** per parcel — these power the "Delivered Today / This Week" metrics and the "Last Seen" column.
 - For account-level automation (no CSVs), DHL eCommerce UK offers a customer API — see the main project notes.
 
 ## Future: Inkari integration
