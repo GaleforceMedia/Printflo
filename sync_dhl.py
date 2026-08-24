@@ -1,129 +1,167 @@
-import urllib.request
-import urllib.error
-import json
-import time
-import os
+"""Background DHL tracking sync for the Printflo Delivery Portal.
+
+Reads every CSV in data/ (and the repo root), collects shipment numbers that
+are not yet delivered, queries the DHL Shipment Tracking (Unified) API for
+each one, and writes the latest statuses to printflo_tracking_cache.json.
+
+Run by the GitHub Action in .github/workflows/dhl_sync.yml. Requires the
+DHL_API_KEY environment variable (set it as a GitHub Actions secret).
+"""
+
 import glob
-import pandas as pd
+import json
+import os
 import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
 
-# Uses a GitHub Secret if available, otherwise falls back to the hardcoded key
-DHL_API_KEY = os.environ.get("DHL_API_KEY", "i043Uc7SRU6Zxs2GfxGk4QmWa4SxA6Ac")
+import pandas as pd
+
+DHL_API_KEY = os.environ.get("DHL_API_KEY", "")
 CACHE_FILE = "printflo_tracking_cache.json"
+DATA_GLOBS = ["data/*.csv", "*.csv"]
 
-def load_cache():
+# DHL unified statusCode -> display status shown on the dashboard
+STATUS_MAP = {
+    "delivered": "Delivered",
+    "transit": "In Transit",
+    "pre-transit": "Awaiting Collection",
+    "failure": "Exception",
+}
+
+
+def load_cache() -> dict:
     if os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, 'r') as f:
+            with open(CACHE_FILE, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
     return {}
 
-def save_cache(cache_data):
-    try:
-        with open(CACHE_FILE, 'w') as f:
-            json.dump(cache_data, f, indent=4)
-    except Exception as e:
-        print(f"Error saving cache: {e}")
 
-def get_active_tracking_numbers():
-    all_files = sorted(glob.glob("*.csv"))
-    if not all_files:
+def save_cache(cache: dict) -> None:
+    cache["_meta"] = {"last_sync": datetime.now(timezone.utc).isoformat()}
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def get_active_tracking_numbers() -> list:
+    files = []
+    for pattern in DATA_GLOBS:
+        files.extend(sorted(glob.glob(pattern)))
+    if not files:
         return []
-        
-    df_list = []
-    for file in all_files:
+
+    frames = []
+    for file in files:
         try:
-            temp_df = pd.read_csv(file, dtype={'Shipment number': str})
-            df_list.append(temp_df)
+            frames.append(pd.read_csv(file, dtype={"Shipment number": str}))
         except Exception:
             continue
-            
-    if not df_list:
-        return []
-        
-    master_df = pd.concat(df_list, ignore_index=True)
-    master_df.columns = master_df.columns.str.strip()
-    
-    if 'Shipment number' not in master_df.columns or 'Status' not in master_df.columns:
+    if not frames:
         return []
 
-    master_df['Shipment number'] = master_df['Shipment number'].astype(str).str.replace(r'\.0$', '', regex=True)
-    master_df['Shipment number'] = master_df['Shipment number'].apply(lambda x: re.sub(r'[^A-Za-z0-9]', '', str(x)))
-    master_df = master_df.drop_duplicates(subset=['Shipment number'], keep='last')
-    
-    # We only want to ping DHL for parcels that are NOT delivered yet
-    active_mask = master_df['Status'].astype(str).str.strip().str.lower() != 'delivered'
-    active_parcels = master_df[active_mask]['Shipment number'].unique().tolist()
-    
-    return [trk for trk in active_parcels if len(trk) >= 10 and trk.lower() != 'nan']
+    df = pd.concat(frames, ignore_index=True)
+    df.columns = df.columns.str.strip()
+    if "Shipment number" not in df.columns or "Status" not in df.columns:
+        return []
 
-def fetch_with_backoff(tracking_num, max_retries=4):
+    df["Shipment number"] = (
+        df["Shipment number"].astype(str)
+        .str.replace(r"\.0$", "", regex=True)
+        .apply(lambda x: re.sub(r"[^A-Za-z0-9]", "", str(x)))
+    )
+    df = df.drop_duplicates(subset=["Shipment number"], keep="last")
+
+    # Only poll DHL for parcels the CSV doesn't already show as delivered
+    active = df[df["Status"].astype(str).str.strip().str.lower() != "delivered"]
+    numbers = active["Shipment number"].unique().tolist()
+    return [t for t in numbers if len(t) >= 10 and t.lower() != "nan"]
+
+
+def fetch_with_backoff(tracking_num: str, max_retries: int = 4):
+    """Return (status_code, description) from DHL, or (None, None) on failure."""
     url = f"https://api-eu.dhl.com/track/shipments?trackingNumber={tracking_num}"
     headers = {
         "DHL-API-Key": DHL_API_KEY,
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        "User-Agent": "PrintfloDeliveryPortal/1.0",
     }
-    
-    delay = 2.0  # Initial polite delay
-    
+    delay = 2.0
     for attempt in range(max_retries):
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=15) as response:
                 if response.status == 200:
                     data = json.loads(response.read().decode())
-                    for shipment in data.get('shipments', []):
-                        return shipment.get('status', {}).get('statusCode', '').lower()
+                    for shipment in data.get("shipments", []):
+                        status = shipment.get("status", {})
+                        return (
+                            str(status.get("statusCode", "")).lower(),
+                            status.get("description", ""),
+                        )
+                return (None, None)
         except urllib.error.HTTPError as e:
-            if e.code in [429, 503]: # Rate limit or Spike Arrest
-                print(f"⚠️ DHL Limit on {tracking_num}. Backing off for {delay}s (Attempt {attempt + 1})...")
+            if e.code in (429, 503):  # rate limit / spike arrest
+                print(f"  Rate-limited on {tracking_num}; backing off {delay:.0f}s (attempt {attempt + 1})")
                 time.sleep(delay)
-                delay *= 2 # Exponential backoff: 2s -> 4s -> 8s
+                delay *= 2
+            elif e.code == 404:
+                print(f"  {tracking_num}: not found (may not be in DHL system yet)")
+                return (None, None)
             else:
-                print(f"HTTP Error {e.code} on {tracking_num}")
-                break
+                print(f"  HTTP {e.code} on {tracking_num}")
+                return (None, None)
         except Exception as e:
-            print(f"Connection error on {tracking_num}: {e}")
-            break
-            
-    return None
+            print(f"  Connection error on {tracking_num}: {e}")
+            return (None, None)
+    return (None, None)
 
-def run_sync():
+
+def run_sync() -> None:
+    if not DHL_API_KEY:
+        print("ERROR: DHL_API_KEY environment variable is not set.")
+        print("Add it as a repository secret and pass it through in the workflow.")
+        sys.exit(1)
+
     print("Initiating Printflo background sync...")
-    active_numbers = get_active_tracking_numbers()
-    
-    if not active_numbers:
+    active = get_active_tracking_numbers()
+    if not active:
         print("No active tracking numbers found. Exiting.")
         return
-        
-    print(f"Found {len(active_numbers)} active parcels to check.")
+
+    print(f"Found {len(active)} active parcels to check.")
     cache = load_cache()
-    current_time = time.time()
-    
-    for trk in active_numbers:
-        # Check if we already have a recent delivered status (prevents re-checking delivered items)
-        if cache.get(trk, {}).get('status') == 'Delivered':
-            continue
-            
+    now = time.time()
+
+    for trk in active:
+        if cache.get(trk, {}).get("status") == "Delivered":
+            continue  # already final — never re-poll
+
         print(f"Checking {trk}...")
-        status_code = fetch_with_backoff(trk)
-        
+        status_code, description = fetch_with_backoff(trk)
+
         if status_code:
-            if status_code == 'delivered':
-                cache[trk] = {'status': 'Delivered', 'timestamp': current_time}
-            elif status_code == 'transit':
-                cache[trk] = {'status': 'In Transit', 'timestamp': current_time}
+            display = STATUS_MAP.get(status_code)
+            if display is None:
+                # 'unknown' or anything unexpected — keep the CSV's status
+                print(f"  Unrecognised statusCode '{status_code}', leaving CSV status in place")
             else:
-                cache[trk] = {'status': 'Exception', 'timestamp': current_time}
-                
-        # Mandatory 1-second pause between successful calls to avoid spike arrests
-        time.sleep(1.0)
-        
+                cache[trk] = {
+                    "status": display,
+                    "description": description,
+                    "timestamp": now,
+                }
+
+        time.sleep(1.0)  # stay under DHL spike-arrest limits
+
     save_cache(cache)
     print("Sync complete. Cache updated.")
+
 
 if __name__ == "__main__":
     run_sync()

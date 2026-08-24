@@ -1,0 +1,4 @@
+﻿"Accounts","Customer reference","Shipment number","Status","Delivery due date","ETA","Number of parcels","Weight","Product","Service","Dispatch date","Business/Recipient name","Contact number","Postal Code"
+"F181494","","60120252150962","In transit","20/07/2026","08:00 - 20:00","1","2","Parcels","Next day","17/07/2026","LAS IGUANAS","","NG22 9DD"
+"F181494","PO310 - KEP24","60120252001015","Delivered","","","1","1","Parcels","Next day","16/07/2026","BELLA ITALIA","1827280880","EH1 1SB"
+"F181494","PO310 - KEP24","60120252001014","Delivered","","","1","1","Parcels","Next day","16/07/2026","LAS IGUANAS","1827280880","PE1 1XB"

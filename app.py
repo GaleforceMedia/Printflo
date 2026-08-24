@@ -1,213 +1,341 @@
-import streamlit as st
-import pandas as pd
+"""Printflo Delivery Portal — Streamlit dashboard for DHL dispatch tracking.
+
+Reads DHL "DashboardSummary" CSV exports from the data/ folder, overlays live
+statuses from printflo_tracking_cache.json (maintained by sync_dhl.py via a
+GitHub Action), and presents a searchable, filterable delivery table.
+"""
+
 import glob
-import os
 import json
+import os
 import re
 from datetime import datetime
 
-# Set up page layout
-st.set_page_config(page_title="Printflo Delivery Portal", layout="wide")
+import pandas as pd
+import streamlit as st
 
+# ------------------------------------------------------------------ constants
 CACHE_FILE = "printflo_tracking_cache.json"
+DATA_GLOBS = ["data/*.csv", "*.csv"]  # data/ preferred; root kept for compatibility
 
-def load_cache():
+BRAND_BLUE = "#174A8C"
+
+st.set_page_config(page_title="Printflo Delivery Portal", page_icon="📦", layout="wide")
+
+# ------------------------------------------------------------------ auth gate
+def check_password() -> bool:
+    """Simple access-code gate. Set APP_PASSWORD in Streamlit secrets.
+
+    If no password is configured (e.g. running locally), the app is open.
+    """
+    expected = None
+    try:
+        expected = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        pass
+    expected = expected or os.environ.get("APP_PASSWORD")
+
+    if not expected:
+        return True  # no password configured — open access (local dev)
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    _, mid, _ = st.columns([1, 1.2, 1])
+    with mid:
+        try:
+            st.image("printflo-logo.png", width=200)
+        except Exception:
+            pass
+        st.markdown("#### Printflo Delivery Portal")
+        pwd = st.text_input("Access code", type="password", key="pwd_input")
+        if st.button("Sign in", type="primary", use_container_width=True):
+            if pwd == expected:
+                st.session_state["auth_ok"] = True
+                st.rerun()
+            else:
+                st.error("Incorrect access code.")
+    return False
+
+
+if not check_password():
+    st.stop()
+
+# ------------------------------------------------------------------ styling
+st.markdown(
+    f"""
+<style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    html, body, [class*="css"] {{ font-family: 'Inter', sans-serif !important; }}
+    #MainMenu, footer, header {{ visibility: hidden; }}
+    h1 {{ font-weight: 700 !important; letter-spacing: -0.5px;
+         border-bottom: 3px solid {BRAND_BLUE}; padding-bottom: 10px; margin-bottom: 5px !important; }}
+    [data-testid="stMetricValue"] {{ font-size: 2.1rem !important; font-weight: 700 !important; color: {BRAND_BLUE} !important; }}
+    table {{ border-collapse: collapse !important; width: 100% !important; font-size: 0.9rem !important;
+            background-color: #FFFFFF !important; border-radius: 8px !important; overflow: hidden !important;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important; }}
+    th {{ background-color: #F3F4F6 !important; font-weight: 600 !important; border-bottom: 2px solid #E5E7EB !important;
+         text-transform: uppercase; font-size: 0.75rem; color: #4B5563 !important; text-align: left !important;
+         padding: 12px 16px !important; }}
+    td {{ background-color: #FFFFFF !important; border-bottom: 1px solid #E5E7EB !important;
+         vertical-align: middle !important; text-align: left !important; padding: 12px 16px !important;
+         color: #111827 !important; }}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# ------------------------------------------------------------------ data load
+def load_cache() -> dict:
     if os.path.exists(CACHE_FILE):
         try:
-            with open(CACHE_FILE, 'r') as f:
+            with open(CACHE_FILE, "r") as f:
                 return json.load(f)
         except Exception:
             return {}
     return {}
 
-# --- Custom CSS (Printflo Branding & Clean Layout) ---
-printflo_css = """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"]  { font-family: 'Inter', sans-serif !important; background-color: #F8F9FA !important; color: #111827 !important; }
-    #MainMenu {visibility: hidden;} footer {visibility: hidden;} header {visibility: hidden;}
-    h1 { font-weight: 700 !important; letter-spacing: -0.5px; color: #111827 !important; border-bottom: 3px solid #174A8C; padding-bottom: 10px; margin-bottom: 5px !important; }
-    [data-testid="stMetricValue"] { font-size: 2.2rem !important; font-weight: 700 !important; color: #174A8C !important; }
-    table { border-collapse: collapse !important; width: 100% !important; font-size: 0.9rem !important; background-color: #FFFFFF !important; border-radius: 8px !important; overflow: hidden !important; box-shadow: 0 4px 6px rgba(0,0,0,0.05) !important; }
-    th { background-color: #F3F4F6 !important; font-weight: 600 !important; border-bottom: 2px solid #E5E7EB !important; text-transform: uppercase; font-size: 0.75rem; color: #4B5563 !important; text-align: left !important; padding: 12px 16px !important; }
-    td { background-color: #FFFFFF !important; border-bottom: 1px solid #E5E7EB !important; vertical-align: middle !important; text-align: left !important; padding: 12px 16px !important; }
-</style>
-"""
-st.markdown(printflo_css, unsafe_allow_html=True)
 
-# --- Header Section ---
-col1, col2 = st.columns([1, 5])
-with col1:
+def clean_shipment_number(value) -> str:
+    s = re.sub(r"\.0$", "", str(value))
+    return re.sub(r"[^A-Za-z0-9]", "", s)
+
+
+@st.cache_data(ttl=60)
+def load_and_merge_data() -> pd.DataFrame:
+    files: list[str] = []
+    for pattern in DATA_GLOBS:
+        files.extend(sorted(glob.glob(pattern)))
+    if not files:
+        return pd.DataFrame()
+
+    frames = []
+    for file in files:
+        try:
+            df = pd.read_csv(file, dtype={"Shipment number": str})
+        except Exception:
+            continue
+        base = os.path.basename(file).rsplit(".csv", 1)[0]
+        is_generic = base.lower().replace(" ", "").startswith("dashboardsummary")
+        df["Campaign"] = "Standard Dispatch" if is_generic else base
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    master = pd.concat(frames, ignore_index=True)
+    master.columns = master.columns.str.strip()
+
+    if "Shipment number" in master.columns:
+        master["Shipment number"] = master["Shipment number"].apply(clean_shipment_number)
+        master = master.drop_duplicates(subset=["Shipment number"], keep="last")
+
+    if "Dispatch date" in master.columns:
+        master["Dispatch Date Parsed"] = pd.to_datetime(
+            master["Dispatch date"], format="%d/%m/%Y", errors="coerce"
+        )
+
+    # Overlay live statuses from the background sync cache
+    cache = load_cache()
+    if "Status" in master.columns and cache:
+        master["Status"] = master.apply(
+            lambda row: cache.get(str(row.get("Shipment number", "")), {}).get(
+                "status", row["Status"]
+            ),
+            axis=1,
+        )
+
+    return master
+
+
+# ------------------------------------------------------------------ header
+col_logo, col_title = st.columns([1, 5])
+with col_logo:
     try:
         st.markdown("<div style='margin-top: 15px;'>", unsafe_allow_html=True)
         st.image("printflo-logo.png", width=180)
         st.markdown("</div>", unsafe_allow_html=True)
-    except FileNotFoundError:
-        pass
-with col2:
-    st.title("Printflo Delivery Portal")
-    st.markdown("<p style='color: #6B7280; font-size: 1.1rem; margin-top: 0px; margin-bottom: 30px;'>Track and manage network deliveries.</p>", unsafe_allow_html=True)
-
-# 1. LOAD CSV DATA (Now purely read-only)
-@st.cache_data(ttl=60) 
-def load_and_merge_data():
-    all_files = sorted(glob.glob("*.csv"))
-    if not all_files:
-        return pd.DataFrame()
-        
-    df_list = []
-    for file in all_files:
-        try:
-            temp_df = pd.read_csv(file, dtype={'Shipment number': str})
-            base_name = os.path.basename(file).replace('.csv', '')
-            temp_df['Campaign'] = 'Standard Dispatch' if 'dashboard summary' in base_name.lower().replace('dashboardsummary', 'dashboard summary') else base_name
-            df_list.append(temp_df)
-        except Exception:
-            continue
-            
-    if not df_list:
-        return pd.DataFrame()
-        
-    master_df = pd.concat(df_list, ignore_index=True)
-    master_df.columns = master_df.columns.str.strip()
-    
-    if 'Shipment number' in master_df.columns:
-        master_df['Shipment number'] = master_df['Shipment number'].astype(str).str.replace(r'\.0$', '', regex=True)
-        master_df['Shipment number'] = master_df['Shipment number'].apply(lambda x: re.sub(r'[^A-Za-z0-9]', '', str(x)))
-        master_df = master_df.drop_duplicates(subset=['Shipment number'], keep='last')
-        
-    if 'Dispatch date' in master_df.columns:
-        master_df['Dispatch Date Parsed'] = pd.to_datetime(master_df['Dispatch date'], format='%d/%m/%Y', errors='coerce')
-        
-    # Read the cache created by sync_dhl.py and overwrite CSV statuses seamlessly
-    cache = load_cache()
-    if 'Status' in master_df.columns:
-        master_df['Status'] = master_df.apply(
-            lambda row: cache.get(str(row['Shipment number']), {}).get('status', row['Status']), axis=1
-        )
-        
-    return master_df
-
-try:
-    df = load_and_merge_data()
-
-    if df.empty:
-        st.warning("No tracking data available for Printflo. Please upload the latest CSV manifest.")
-        st.stop()
-
-    # --- Live Metric Calculations ---
-    today = pd.Timestamp.now('Europe/London').normalize().tz_localize(None)
-    yesterday = today - pd.Timedelta(days=1)
-    start_of_week = today - pd.Timedelta(days=today.dayofweek)
-    start_of_month = today.replace(day=1)
-    
-    df['Clean Status'] = df['Status'].astype(str).str.strip().str.lower()
-    in_transit = len(df[df['Clean Status'].isin(['in transit', 'out for delivery'])])
-    delivered_df = df[df['Clean Status'] == 'delivered']
-    
-    if 'Dispatch Date Parsed' in df.columns:
-        delivered_df_dates = delivered_df['Dispatch Date Parsed'].dt.tz_localize(None)
-        delivered_today = len(delivered_df[delivered_df_dates.isin([today, yesterday])])
-        delivered_week = len(delivered_df[delivered_df_dates >= start_of_week])
-        delivered_month = len(delivered_df[delivered_df_dates >= start_of_month])
-    else:
-        delivered_today, delivered_week, delivered_month = 0, 0, 0
-
-    # --- Display Top Metrics ---
-    st.markdown("<br>", unsafe_allow_html=True)
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label="In Transit", value=in_transit)
-    col2.metric(label="Delivered Today", value=delivered_today)
-    col3.metric(label="Delivered This Week", value=delivered_week)
-    col4.metric(label="Delivered This Month", value=delivered_month)
-
-    # Cache timestamp logic
-    try:
-        last_sync = os.path.getmtime(CACHE_FILE)
-        sync_time_str = datetime.fromtimestamp(last_sync).strftime("%A, %d %B %Y at %I:%M %p")
     except Exception:
-        sync_time_str = "Awaiting initial background sync"
-
-    st.markdown(f"<div style='text-align: center; color: #6B7280; font-size: 0.85rem; margin-top: 10px; margin-bottom: 20px; font-weight: 500;'>Network Data Last Synced: {sync_time_str}</div>", unsafe_allow_html=True)
-    st.markdown("<hr><br>", unsafe_allow_html=True)
-
-    # --- Side-by-Side Filtering ---
-    col_filter1, col_filter2, col_filter3 = st.columns(3)
-    
-    unique_campaigns = sorted(df['Campaign'].dropna().unique()) if 'Campaign' in df.columns else []
-        
-    search_postcode = col_filter1.text_input("SEARCH POSTCODE", placeholder="e.g. B78 3JD")
-    search_ref = col_filter2.text_input("SEARCH CUSTOMER REF.")
-    selected_campaign = col_filter3.selectbox("SEARCH CAMPAIGN", ["All Campaigns"] + list(unique_campaigns))
-
-    filtered_df = df.copy()
-
-    if search_postcode.strip():
-        filtered_df = filtered_df[filtered_df['Postal Code'].astype(str).str.contains(search_postcode.strip(), case=False, na=False)]
-    if search_ref.strip() and 'Customer reference' in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df['Customer reference'].astype(str).str.contains(search_ref.strip(), case=False, na=False)]
-    if selected_campaign != "All Campaigns":
-        filtered_df = filtered_df[filtered_df['Campaign'] == selected_campaign]
-
-    # --- Dual-Layer Auto-Sort Logic ---
-    filtered_df['Is_Delivered'] = filtered_df['Clean Status'] == 'delivered'
-    if 'Dispatch Date Parsed' in filtered_df.columns:
-        filtered_df = filtered_df.sort_values(by=['Is_Delivered', 'Dispatch Date Parsed'], ascending=[True, False])
-    else:
-        filtered_df = filtered_df.sort_values(by=['Is_Delivered'], ascending=[True])
-
-    # --- EXPORT FEATURE ---
-    export_df = filtered_df.copy()
-    cols_to_drop = ['Is_Delivered', 'Clean Status', 'Dispatch Date Parsed']
-    export_df = export_df.drop(columns=[c for c in cols_to_drop if c in export_df.columns])
-    csv_export_data = export_df.to_csv(index=False).encode('utf-8')
-    
-    st.download_button(
-        label="📥 Download Filtered Data as CSV",
-        data=csv_export_data,
-        file_name=f"Printflo_Deliveries_Export_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
-        mime="text/csv"
+        pass
+with col_title:
+    st.title("Printflo Delivery Portal")
+    st.markdown(
+        "<p style='color: #6B7280; font-size: 1.1rem; margin: 0 0 30px 0;'>"
+        "Track and manage network deliveries.</p>",
+        unsafe_allow_html=True,
     )
-    st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- UI Formatting ---
-    def format_delivered_blanks(row, col_name):
-        val = str(row[col_name]) if pd.notna(row[col_name]) else ""
-        if row['Clean Status'] == 'delivered':
-            return '<span style="background-color: #D4EDDA; color: #155724; padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; font-weight: 600;">-</span>'
-        return val
+df = load_and_merge_data()
 
-    if 'Delivery due date' in filtered_df.columns:
-        filtered_df['Delivery due date'] = filtered_df.apply(lambda r: format_delivered_blanks(r, 'Delivery due date'), axis=1)
-    if 'ETA' in filtered_df.columns:
-        filtered_df['ETA'] = filtered_df.apply(lambda r: format_delivered_blanks(r, 'ETA'), axis=1)
+if df.empty:
+    st.warning("No tracking data available. Upload the latest DHL CSV export to the data/ folder.")
+    st.stop()
 
-    def make_clickable(shipment_num):
-        if pd.isna(shipment_num) or str(shipment_num).strip().lower() == 'nan' or len(str(shipment_num)) < 5:
-            return ""
-        clean_num = str(shipment_num).strip()
-        url = f"https://www.dhl.com/en/express/tracking.html?AWB={clean_num}"
-        return f'<a href="{url}" target="_blank" style="color: #174A8C; text-decoration: underline; font-weight: 600;">Track Order</a>'
+# ------------------------------------------------------------------ metrics
+df["Clean Status"] = df["Status"].astype(str).str.strip().str.lower()
 
-    filtered_df['Tracking Link'] = filtered_df['Shipment number'].apply(make_clickable)
+today = pd.Timestamp.now(tz="Europe/London").tz_localize(None).normalize()
+start_of_week = today - pd.Timedelta(days=today.dayofweek)
+start_of_month = today.replace(day=1)
 
-    def color_status(status_val):
-        val_lower = str(status_val).strip().lower()
-        bg_color, text_color = "#E0E0E0", "#333333"
-        if val_lower == 'delivered':
-            bg_color, text_color = "#D4EDDA", "#155724"
-        elif val_lower in ['in transit', 'out for delivery']:
-            bg_color, text_color = "#FFF3CD", "#856404"
-        elif 'exception' in val_lower or 'delay' in val_lower:
-            bg_color, text_color = "#F8D7DA", "#721C24"
-        return f'<span style="background-color: {bg_color}; color: {text_color}; padding: 6px 12px; border-radius: 20px; font-weight: 600; font-size: 0.8rem; text-transform: uppercase;">{status_val}</span>'
+total_shipments = len(df)
+in_transit = int((df["Clean Status"] == "in transit").sum())
+out_for_delivery = int((df["Clean Status"] == "out for delivery").sum())
+delivered = int((df["Clean Status"] == "delivered").sum())
+exceptions = int(
+    df["Clean Status"].str.contains("exception|delay|fail", na=False, regex=True).sum()
+)
 
-    filtered_df['Status'] = filtered_df['Status'].apply(color_status)
+if "Dispatch Date Parsed" in df.columns:
+    dispatched_week = int((df["Dispatch Date Parsed"] >= start_of_week).sum())
+    dispatched_month = int((df["Dispatch Date Parsed"] >= start_of_month).sum())
+else:
+    dispatched_week = dispatched_month = 0
 
-    display_cols = ['Campaign', 'Customer reference', 'Business/Recipient name', 'Status', 'Delivery due date', 'ETA', 'Tracking Link', 'Number of parcels', 'Weight', 'Shipment number', 'Postal Code']
-    available_cols = [col for col in display_cols if col in filtered_df.columns]
+st.markdown("<br>", unsafe_allow_html=True)
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Total Shipments", f"{total_shipments:,}")
+m2.metric("In Transit", f"{in_transit:,}")
+m3.metric("Out for Delivery", f"{out_for_delivery:,}")
+m4.metric("Delivered", f"{delivered:,}")
+m5.metric("Exceptions", f"{exceptions:,}")
 
-    st.write(filtered_df[available_cols].to_html(escape=False, index=False), unsafe_allow_html=True)
+# Last-sync stamp: prefer timestamp recorded inside the cache, fall back to file mtime
+sync_time_str = "Awaiting initial background sync"
+cache_meta = load_cache().get("_meta", {})
+if cache_meta.get("last_sync"):
+    try:
+        ts = datetime.fromisoformat(cache_meta["last_sync"])
+        sync_time_str = ts.strftime("%A, %d %B %Y at %H:%M %Z").strip()
+    except Exception:
+        pass
+elif os.path.exists(CACHE_FILE):
+    sync_time_str = datetime.fromtimestamp(os.path.getmtime(CACHE_FILE)).strftime(
+        "%A, %d %B %Y at %H:%M"
+    )
 
-except Exception as e:
-    st.error(f"An error occurred: {e}")
+st.markdown(
+    f"<div style='text-align: center; color: #6B7280; font-size: 0.85rem; margin: 10px 0 20px; "
+    f"font-weight: 500;'>Network data last synced: {sync_time_str}</div>",
+    unsafe_allow_html=True,
+)
+st.markdown("<hr><br>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ filters
+f1, f2, f3, f4 = st.columns(4)
+
+search_postcode = f1.text_input("SEARCH POSTCODE", placeholder="e.g. B78 3JD")
+search_ref = f2.text_input("SEARCH CUSTOMER REF. / RECIPIENT")
+campaigns = sorted(df["Campaign"].dropna().unique()) if "Campaign" in df.columns else []
+selected_campaign = f3.selectbox("CAMPAIGN", ["All Campaigns"] + list(campaigns))
+selected_status = f4.selectbox(
+    "STATUS", ["All Statuses", "In Transit", "Out for Delivery", "Delivered", "Exception"]
+)
+
+filtered = df.copy()
+
+if search_postcode.strip() and "Postal Code" in filtered.columns:
+    filtered = filtered[
+        filtered["Postal Code"].astype(str).str.contains(search_postcode.strip(), case=False, na=False)
+    ]
+if search_ref.strip():
+    term = search_ref.strip()
+    mask = pd.Series(False, index=filtered.index)
+    for col in ("Customer reference", "Business/Recipient name"):
+        if col in filtered.columns:
+            mask |= filtered[col].astype(str).str.contains(term, case=False, na=False)
+    filtered = filtered[mask]
+if selected_campaign != "All Campaigns":
+    filtered = filtered[filtered["Campaign"] == selected_campaign]
+if selected_status != "All Statuses":
+    if selected_status == "Exception":
+        filtered = filtered[
+            filtered["Clean Status"].str.contains("exception|delay|fail", na=False, regex=True)
+        ]
+    else:
+        filtered = filtered[filtered["Clean Status"] == selected_status.lower()]
+
+# Undelivered first, newest dispatches first within each group
+filtered["Is_Delivered"] = filtered["Clean Status"] == "delivered"
+sort_cols = ["Is_Delivered"]
+ascending = [True]
+if "Dispatch Date Parsed" in filtered.columns:
+    sort_cols.append("Dispatch Date Parsed")
+    ascending.append(False)
+filtered = filtered.sort_values(by=sort_cols, ascending=ascending)
+
+st.markdown(
+    f"<div style='color:#6B7280; font-size:0.85rem; margin-bottom:8px;'>"
+    f"Showing {len(filtered):,} of {total_shipments:,} shipments</div>",
+    unsafe_allow_html=True,
+)
+
+# ------------------------------------------------------------------ export
+export_df = filtered.drop(
+    columns=[c for c in ("Is_Delivered", "Clean Status", "Dispatch Date Parsed") if c in filtered.columns]
+)
+st.download_button(
+    label="📥 Download filtered data as CSV",
+    data=export_df.to_csv(index=False).encode("utf-8"),
+    file_name=f"Printflo_Deliveries_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+    mime="text/csv",
+)
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ------------------------------------------------------------------ table
+def badge(text: str, bg: str, fg: str) -> str:
+    return (
+        f'<span style="background-color:{bg}; color:{fg}; padding:6px 12px; border-radius:20px; '
+        f'font-weight:600; font-size:0.8rem; text-transform:uppercase;">{text}</span>'
+    )
+
+
+def blank_when_delivered(row, col_name):
+    val = str(row[col_name]) if pd.notna(row[col_name]) else ""
+    if row["Clean Status"] == "delivered":
+        return badge("-", "#D4EDDA", "#155724")
+    return val
+
+
+for col in ("Delivery due date", "ETA"):
+    if col in filtered.columns:
+        filtered[col] = filtered.apply(lambda r, c=col: blank_when_delivered(r, c), axis=1)
+
+
+def make_clickable(shipment_num):
+    s = str(shipment_num).strip()
+    if not s or s.lower() == "nan" or len(s) < 5:
+        return ""
+    url = f"https://www.dhl.com/gb-en/home/tracking.html?tracking-id={s}&submit=1"
+    return (
+        f'<a href="{url}" target="_blank" style="color:{BRAND_BLUE}; text-decoration:underline; '
+        f'font-weight:600;">Track Order</a>'
+    )
+
+
+if "Shipment number" in filtered.columns:
+    filtered["Tracking Link"] = filtered["Shipment number"].apply(make_clickable)
+
+
+def color_status(status_val):
+    v = str(status_val).strip().lower()
+    bg, fg = "#E0E0E0", "#333333"
+    if v == "delivered":
+        bg, fg = "#D4EDDA", "#155724"
+    elif v in ("in transit", "out for delivery"):
+        bg, fg = "#FFF3CD", "#856404"
+    elif re.search(r"exception|delay|fail", v):
+        bg, fg = "#F8D7DA", "#721C24"
+    return badge(status_val, bg, fg)
+
+
+filtered["Status"] = filtered["Status"].apply(color_status)
+
+display_cols = [
+    "Campaign", "Customer reference", "Business/Recipient name", "Status",
+    "Delivery due date", "ETA", "Tracking Link", "Number of parcels",
+    "Weight", "Shipment number", "Postal Code",
+]
+available = [c for c in display_cols if c in filtered.columns]
+st.write(filtered[available].to_html(escape=False, index=False), unsafe_allow_html=True)
