@@ -162,7 +162,10 @@
   "30222218722931": {
     "status": "In Transit",
     "description": "Van is loaded",
-    "timestamp": 1787583535.24165
+    "delivered_at": "",
+    "eta": "2026-07-17T00:00:00Z",
+    "last_event": "Van is loaded \u2014 Greenford",
+    "updated_at": "2026-08-24T15:33:07.862743+00:00"
   },
   "30222218722886": {
     "status": "Delivered",
@@ -231,8 +234,11 @@
   },
   "30222218722848": {
     "status": "In Transit",
-    "description": "",
-    "timestamp": 1787583535.24165
+    "description": "We have your parcel",
+    "delivered_at": "",
+    "eta": "2026-07-22T00:00:00Z",
+    "last_event": "We have your parcel",
+    "updated_at": "2026-08-24T15:33:07.862743+00:00"
   },
   "30222218722940": {
     "status": "Delivered",
@@ -317,7 +323,10 @@
   "30222218722826": {
     "status": "In Transit",
     "description": "Van is loaded",
-    "timestamp": 1787583535.24165
+    "delivered_at": "",
+    "eta": "2026-07-20T00:00:00Z",
+    "last_event": "Van is loaded \u2014 Cardiff",
+    "updated_at": "2026-08-24T15:33:07.862743+00:00"
   },
   "30222218722910": {
     "status": "Delivered",
@@ -822,7 +831,10 @@
   "60120251753553": {
     "status": "In Transit",
     "description": "Intervention",
-    "timestamp": 1787583535.24165
+    "delivered_at": "",
+    "eta": "2026-07-22T00:00:00Z",
+    "last_event": "Intervention \u2014 Sheffield",
+    "updated_at": "2026-08-24T15:33:07.862743+00:00"
   },
   "60120251753567": {
     "status": "Delivered",
@@ -832,7 +844,10 @@
   "60120251753545": {
     "status": "In Transit",
     "description": "Held at Delivery Depot",
-    "timestamp": 1787583535.24165
+    "delivered_at": "",
+    "eta": "2026-07-15T00:00:00Z",
+    "last_event": "Held at Delivery Depot",
+    "updated_at": "2026-08-24T15:33:07.862743+00:00"
   },
   "60120251753315": {
     "status": "Delivered",
@@ -840,6 +855,6 @@
     "timestamp": 1787583535.24165
   },
   "_meta": {
-    "last_sync": "2026-08-24T15:03:31.636778+00:00"
+    "last_sync": "2026-08-24T15:33:12.305506+00:00"
   }
 }
